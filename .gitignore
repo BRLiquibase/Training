@@ -1,0 +1,32 @@
+# Liquibase state files
+liquibase.log
+liquibase.properties
+
+# Local environment config
+.env
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Node/npm cache (if used)
+node_modules/
+
+# Python cache (if used)
+__pycache__/
+*.pyc
+*.pyo
+
+# Archive files
+*.zip
+*.tar.gz
+
+# Temporary files
+tmp/
+
+# Ignore GitHub Actions runner files
+actions-runner/
