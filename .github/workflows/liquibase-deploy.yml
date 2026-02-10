@@ -1,4 +1,4 @@
-name: Liquibase Snowflake Deployment
+name: Liquibase Postgres Deployment
 
 on:
   workflow_dispatch:
