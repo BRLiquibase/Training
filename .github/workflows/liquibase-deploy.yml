@@ -15,7 +15,7 @@ env:
   LIQUIBASE_COMMAND_URL: ${{ secrets.postgres }}
   LIQUIBASE_COMMAND_USERNAME: ${{ secrets.postgres_user }}
   LIQUIBASE_COMMAND_PASSWORD: ${{ secrets.postgres_pass }}
-  LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog.root.xml
+  LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog.main.xml
 
 jobs:
   deploy:
