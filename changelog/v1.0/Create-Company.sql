@@ -13,5 +13,3 @@ CREATE TABLE company (
 INSERT INTO company (name, address) VALUES ('Acme Corporation', '123 Main St, Anytown, USA');
 INSERT INTO company (name, address) VALUES ('Globex Inc.', '456 Elm St, Othertown, USA');
 --rollback DELETE FROM company WHERE name IN ('Acme Corporation', 'Globex Inc.');
-
-drop table company;
