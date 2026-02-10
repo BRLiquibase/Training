@@ -1,0 +1,29 @@
+name: Liquibase Snowflake Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      labels:
+        type: string
+        description: Label filter (comma-separated, leave empty for all)
+        required: false
+        default: ''
+
+env:
+  LB_LABELS: ${{ github.event.inputs.labels || '' }}
+  LIQUIBASE_LICENSE_KEY: ${{ secrets.LIQUIBASE_LICENSE_KEY }}
+  LIQUIBASE_COMMAND_URL: ${{ secrets.postgres }}
+  LIQUIBASE_COMMAND_USERNAME: ${{ secrets.postgres_user }}
+  LIQUIBASE_COMMAND_PASSWORD: ${{ secrets.postgres_pass }}
+  LIQUIBASE_COMMAND_CHANGELOG_FILE: changelog/changelog.root.xml
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Run Liquibase Flow
+      run: liquibase flow --flow-file=liquibase.flowfile.yaml
