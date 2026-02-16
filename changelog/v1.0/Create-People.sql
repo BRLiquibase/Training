@@ -19,3 +19,10 @@ INSERT INTO people (first_name, last_name) VALUES ('Jane', 'Smith');
 ALTER TABLE people ADD COLUMN email VARCHAR(100);
 
 --rollback ALTER TABLE people DROP COLUMN email;
+
+--changeset benriley:4CreatePersonTable
+CREATE TABLE people (
+    id SERIAL PRIMARY KEY,
+    first_name VARCHAR(50) NOT NULL,
+    last_name VARCHAR(50) NOT NULL
+);
