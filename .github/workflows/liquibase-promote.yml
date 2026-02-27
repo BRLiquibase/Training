@@ -1,0 +1,141 @@
+name: Liquibase Promote
+
+# Dynamic run-name includes environment for unique identification
+run-name: Promote to ${{ inputs.environment }} - Run #${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_artifact_name:
+        description: 'Source artifact name (e.g., deployment-dev-42)'
+        required: true
+        type: string
+      source_run_id:
+        description: 'Workflow run ID that created the artifact'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      dispatch_id:
+        description: 'Unique dispatch ID for tracking (auto-generated)'
+        required: false
+        type: string
+
+# Concurrency group per environment - prevents parallel db operations (FR-022f)
+concurrency:
+  group: db-operations-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote to ${{ inputs.environment }}
+    runs-on: ${{ vars.LIQUIBASE_RUNNER_LABEL || 'ubuntu-latest' }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Download deployment artifact from source
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.source_artifact_name }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: liquibase/
+
+      - name: Verify artifact contents
+        run: |
+          echo "📦 Verifying artifact contents..."
+          if [ ! -f "liquibase/changelog.xml" ]; then
+            echo "::error::Missing changelog.xml in artifact"
+            exit 1
+          fi
+          if [ ! -d "liquibase/changelogs" ]; then
+            echo "::error::Missing changelogs directory in artifact"
+            exit 1
+          fi
+          echo "✅ Artifact structure verified"
+          echo "Files found:"
+          find liquibase -type f | head -20
+
+      - name: Check for pre-installed Liquibase
+        id: check-liquibase
+        run: |
+          if command -v liquibase &> /dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Liquibase is pre-installed: $(liquibase --version | head -1)"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Liquibase not found, will install via setup-liquibase"
+          fi
+
+      - name: Setup Liquibase
+        if: steps.check-liquibase.outputs.found != 'true'
+        uses: liquibase/setup-liquibase@v2
+        with:
+          version: '5.0.0'
+          edition: 'secure'
+
+      - name: Set environment variables
+        id: env
+        run: |
+          ENV_NAME="${{ inputs.environment }}"
+          ENV_UPPER=$(echo "$ENV_NAME" | tr '[:lower:]' '[:upper:]')
+          echo "env_name=$ENV_NAME" >> $GITHUB_OUTPUT
+          echo "env_upper=$ENV_UPPER" >> $GITHUB_OUTPUT
+
+      - name: Run Liquibase Update (from artifact)
+        working-directory: liquibase
+        env:
+          LIQUIBASE_LICENSE_KEY: ${{ secrets.LIQUIBASE_LICENSE_KEY }}
+          LIQUIBASE_URL: ${{ secrets[format('LIQUIBASE_{0}_URL', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_USERNAME: ${{ secrets[format('LIQUIBASE_{0}_USERNAME', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_PASSWORD: ${{ secrets[format('LIQUIBASE_{0}_PASSWORD', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_SCHEMA: ${{ secrets[format('LIQUIBASE_{0}_SCHEMA', steps.env.outputs.env_upper)] }}
+        run: |
+          echo "🚀 Promoting to ${{ inputs.environment }}..."
+          echo "Source artifact: ${{ inputs.source_artifact_name }}"
+
+          # Build command array to safely handle special characters
+          ARGS=(
+            "liquibase"
+            "update"
+            "--changelog-file=changelog.xml"
+            "--url=$LIQUIBASE_URL"
+            "--username=$LIQUIBASE_USERNAME"
+            "--password=$LIQUIBASE_PASSWORD"
+          )
+
+          # Only add schema parameters if LIQUIBASE_SCHEMA is set
+          if [ -n "$LIQUIBASE_SCHEMA" ]; then
+            ARGS+=("--liquibase-schema-name=$LIQUIBASE_SCHEMA")
+            ARGS+=("--default-schema-name=$LIQUIBASE_SCHEMA")
+          fi
+
+          # Execute with array expansion (properly handles special characters)
+          "${ARGS[@]}"
+
+      - name: Create deployment artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-${{ steps.env.outputs.env_name }}-${{ github.run_number }}
+          path: |
+            liquibase/changelog.xml
+            liquibase/changelogs/
+          retention-days: 90
+
+      - name: Promotion result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "::notice::Promotion to ${{ inputs.environment }} SUCCEEDED"
+          else
+            echo "::error::Promotion to ${{ inputs.environment }} FAILED"
+          fi

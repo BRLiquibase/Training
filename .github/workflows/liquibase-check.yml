@@ -1,0 +1,77 @@
+name: Liquibase Policy Check
+
+# Dynamic run-name includes PR number for unique identification (used by polling)
+run-name: Policy Check - PR#${{ github.event.pull_request.number }}
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'liquibase/**'
+
+jobs:
+  policy-check:
+    name: Run Policy Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for pre-installed Liquibase
+        id: check-liquibase
+        run: |
+          if command -v liquibase &> /dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Liquibase is pre-installed: $(liquibase --version | head -1)"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Liquibase not found, will install via setup-liquibase"
+          fi
+
+      - name: Setup Liquibase
+        if: steps.check-liquibase.outputs.found != 'true'
+        uses: liquibase/setup-liquibase@v2
+        with:
+          version: '5.0.0'
+          edition: 'secure'
+
+      - name: Run Liquibase Checks
+        working-directory: liquibase
+        run: |
+          # Run checks and capture exit code
+          set +e
+          liquibase checks run \
+            --checks-settings-file=liquibase.checks-settings.conf \
+            --changelog-file=changelog.xml \
+            --format=json \
+            --report-enabled=false > checks-results.json
+          EXIT_CODE=$?
+          set -e
+
+          # Show results
+          echo "Exit code: $EXIT_CODE"
+          if [ -f checks-results.json ]; then
+            echo "Results file size: $(wc -c < checks-results.json) bytes"
+            cat checks-results.json
+          else
+            echo "::error::checks-results.json was not created"
+            echo '{"error": "Liquibase checks did not produce output", "returnCode": '$EXIT_CODE'}' > checks-results.json
+          fi
+
+          # Liquibase checks returns non-zero when checks fail, but we still want to upload results
+          # Only fail if the command didn't run at all (e.g., license key missing)
+          if [ $EXIT_CODE -gt 10 ]; then
+            echo "::error::Liquibase checks command failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
+        env:
+          LIQUIBASE_LICENSE_KEY: ${{ secrets.LIQUIBASE_LICENSE_KEY }}
+
+      - name: Upload check results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: policy-check-results-${{ github.run_id }}
+          path: liquibase/checks-results.json
+          retention-days: 30

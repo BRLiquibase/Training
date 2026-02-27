@@ -1,0 +1,166 @@
+name: Liquibase Rollback
+
+# Dynamic run-name includes rollback ID and environment for unique identification
+run-name: Rollback - ${{ inputs.rollback_id }} · ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      rollback_id:
+        description: 'Rollback operation ID (for tracking)'
+        required: true
+        type: string
+      changesets:
+        description: 'JSON array of changesets to rollback [{author, id, path, change_id}]'
+        required: true
+        type: string
+      db_id:
+        description: 'Database connection ID (for tracking)'
+        required: true
+        type: string
+      db_type:
+        description: 'Database type'
+        required: true
+        type: choice
+        options:
+          - postgresql
+          - oracle
+          - sqlserver
+          - mysql
+      dispatch_id:
+        description: 'Unique dispatch ID for tracking (auto-generated)'
+        required: false
+        type: string
+
+# Concurrency group per environment - prevents parallel db operations
+concurrency:
+  group: db-operations-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback to ${{ inputs.environment }}
+    runs-on: ${{ vars.LIQUIBASE_RUNNER_LABEL || 'ubuntu-latest' }}
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for pre-installed Liquibase
+        id: check-liquibase
+        run: |
+          if command -v liquibase &> /dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Liquibase is pre-installed: $(liquibase --version | head -1)"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Liquibase not found, will install via setup-liquibase"
+          fi
+
+      - name: Setup Liquibase
+        if: steps.check-liquibase.outputs.found != 'true'
+        uses: liquibase/setup-liquibase@v2
+        with:
+          version: '5.0.0'
+          edition: 'secure'
+
+      - name: Set environment variables
+        id: env
+        run: |
+          ENV_NAME="${{ inputs.environment }}"
+          ENV_UPPER=$(echo "$ENV_NAME" | tr '[:lower:]' '[:upper:]')
+          echo "env_name=$ENV_NAME" >> $GITHUB_OUTPUT
+          echo "env_upper=$ENV_UPPER" >> $GITHUB_OUTPUT
+
+      - name: Parse changesets
+        id: parse
+        run: |
+          # Parse the JSON array of changesets
+          CHANGESETS='${{ inputs.changesets }}'
+          echo "📋 Changesets to rollback:"
+          echo "$CHANGESETS" | jq -r '.[] | "  - \(.author):\(.id) (\(.path))"'
+
+          # Count changesets
+          COUNT=$(echo "$CHANGESETS" | jq 'length')
+          echo "changeset_count=$COUNT" >> $GITHUB_OUTPUT
+          echo "🔄 Rolling back $COUNT changeset(s)"
+
+      - name: Execute Rollback
+        working-directory: liquibase
+        env:
+          LIQUIBASE_LICENSE_KEY: ${{ secrets.LIQUIBASE_LICENSE_KEY }}
+          LIQUIBASE_URL: ${{ secrets[format('LIQUIBASE_{0}_URL', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_USERNAME: ${{ secrets[format('LIQUIBASE_{0}_USERNAME', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_PASSWORD: ${{ secrets[format('LIQUIBASE_{0}_PASSWORD', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_SCHEMA: ${{ secrets[format('LIQUIBASE_{0}_SCHEMA', steps.env.outputs.env_upper)] }}
+        run: |
+          echo "🚀 Starting rollback for ${{ inputs.environment }}..."
+          echo "📦 Rollback ID: ${{ inputs.rollback_id }}"
+
+          # Parse changesets and rollback each one in order
+          CHANGESETS='${{ inputs.changesets }}'
+
+          # Get count of changesets
+          COUNT=$(echo "$CHANGESETS" | jq 'length')
+
+          # Build base command array
+          BASE_ARGS=(
+            "liquibase"
+            "--changelog-file=changelog.xml"
+            "--url=$LIQUIBASE_URL"
+            "--username=$LIQUIBASE_USERNAME"
+            "--password=$LIQUIBASE_PASSWORD"
+          )
+
+          # Only add schema parameters if LIQUIBASE_SCHEMA is set
+          if [ -n "$LIQUIBASE_SCHEMA" ]; then
+            BASE_ARGS+=("--liquibase-schema-name=$LIQUIBASE_SCHEMA")
+            BASE_ARGS+=("--default-schema-name=$LIQUIBASE_SCHEMA")
+          fi
+
+          # Rollback each changeset
+          for i in $(seq 0 $((COUNT - 1))); do
+            CHANGESET=$(echo "$CHANGESETS" | jq -r ".[$i]")
+            AUTHOR=$(echo "$CHANGESET" | jq -r '.author')
+            ID=$(echo "$CHANGESET" | jq -r '.id')
+            PATH_VAL=$(echo "$CHANGESET" | jq -r '.path')
+            CHANGE_ID=$(echo "$CHANGESET" | jq -r '.change_id')
+
+            echo ""
+            echo "=== Rolling back changeset $((i + 1))/$COUNT ==="
+            echo "  Author: $AUTHOR"
+            echo "  ID: $ID"
+            echo "  Path: $PATH_VAL"
+            echo "  Change ID: $CHANGE_ID"
+
+            # Execute rollback for this specific changeset
+            ARGS=("${BASE_ARGS[@]}" "rollback-one-changeset" "--changeset-author=$AUTHOR" "--changeset-id=$ID" "--changeset-path=$PATH_VAL" "--force")
+
+            if "${ARGS[@]}"; then
+              echo "✅ Successfully rolled back $AUTHOR:$ID"
+            else
+              echo "::error::Failed to rollback changeset $AUTHOR:$ID"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "✅ All $COUNT changeset(s) rolled back successfully"
+
+      - name: Rollback result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "::notice::Rollback to ${{ inputs.environment }} SUCCEEDED - ${{ steps.parse.outputs.changeset_count }} changeset(s) rolled back"
+          else
+            echo "::error::Rollback to ${{ inputs.environment }} FAILED"
+          fi

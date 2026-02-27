@@ -1,0 +1,130 @@
+name: Liquibase Test Connection
+
+# Dynamic run-name includes dispatch ID and db_id for unique identification
+run-name: Test Connection - ${{ inputs.dispatch_id || github.run_id }} · ${{ inputs.db_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment name (e.g., dev, staging, prod)'
+        required: true
+        type: string
+      db_id:
+        description: 'Database connection ID (for tracking)'
+        required: true
+        type: string
+      db_type:
+        description: 'Database type'
+        required: true
+        type: choice
+        options:
+          - postgresql
+          - oracle
+          - sqlserver
+          - mysql
+      dispatch_id:
+        description: 'Unique dispatch ID for tracking (auto-generated)'
+        required: false
+        type: string
+      db_host:
+        description: 'Database hostname for pre-flight connectivity check'
+        required: true
+        type: string
+      db_port:
+        description: 'Database port for pre-flight connectivity check'
+        required: true
+        type: string
+
+jobs:
+  test-connection:
+    name: Test Database Connection
+    runs-on: ${{ vars.LIQUIBASE_RUNNER_LABEL || 'ubuntu-latest' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pre-flight connectivity check
+        run: |
+          HOST="${{ inputs.db_host }}"
+          PORT="${{ inputs.db_port }}"
+
+          echo "🔍 Checking DNS resolution for $HOST..."
+          if ! getent hosts "$HOST" > /dev/null 2>&1; then
+            echo "::error::DNS resolution failed for '$HOST'. Check that the hostname is correct."
+            exit 1
+          fi
+          echo "✅ DNS resolution successful"
+
+          echo "🔍 Checking TCP connectivity to $HOST:$PORT..."
+          if ! timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$PORT" 2>/dev/null; then
+            echo "::error::Port $PORT unreachable on '$HOST'. Check firewall rules and that the database is running."
+            exit 1
+          fi
+          echo "✅ TCP connectivity successful"
+
+          echo "🚀 Pre-flight checks passed, proceeding with database connection test..."
+
+      - name: Check for pre-installed Liquibase
+        id: check-liquibase
+        run: |
+          if command -v liquibase &> /dev/null; then
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Liquibase is pre-installed: $(liquibase --version | head -1)"
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Liquibase not found, will install via setup-liquibase"
+          fi
+
+      - name: Setup Liquibase
+        if: steps.check-liquibase.outputs.found != 'true'
+        uses: liquibase/setup-liquibase@v2
+        with:
+          version: '5.0.0'
+          edition: 'secure'
+
+      - name: Set environment variables
+        id: env
+        run: |
+          ENV_NAME="${{ inputs.environment }}"
+          ENV_UPPER=$(echo "$ENV_NAME" | tr '[:lower:]' '[:upper:]')
+          echo "env_name=$ENV_NAME" >> $GITHUB_OUTPUT
+          echo "env_upper=$ENV_UPPER" >> $GITHUB_OUTPUT
+
+      - name: Test Database Connection
+        env:
+          LIQUIBASE_LICENSE_KEY: ${{ secrets.LIQUIBASE_LICENSE_KEY }}
+          LIQUIBASE_URL: ${{ secrets[format('LIQUIBASE_{0}_URL', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_USERNAME: ${{ secrets[format('LIQUIBASE_{0}_USERNAME', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_PASSWORD: ${{ secrets[format('LIQUIBASE_{0}_PASSWORD', steps.env.outputs.env_upper)] }}
+          LIQUIBASE_SCHEMA: ${{ secrets[format('LIQUIBASE_{0}_SCHEMA', steps.env.outputs.env_upper)] }}
+        run: |
+          echo "Testing connection to ${{ inputs.environment }} database..."
+
+          # Build command array to safely handle special characters
+          ARGS=(
+            "liquibase"
+            "connect"
+            "--url=$LIQUIBASE_URL"
+            "--username=$LIQUIBASE_USERNAME"
+            "--password=$LIQUIBASE_PASSWORD"
+          )
+
+          # Only add schema parameters if LIQUIBASE_SCHEMA is set
+          if [ -n "$LIQUIBASE_SCHEMA" ]; then
+            ARGS+=("--liquibase-schema-name=$LIQUIBASE_SCHEMA")
+            ARGS+=("--default-schema-name=$LIQUIBASE_SCHEMA")
+          fi
+
+          # Execute with array expansion (properly handles special characters)
+          "${ARGS[@]}"
+
+      - name: Connection test result
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "::notice::Database connection test PASSED for ${{ inputs.environment }}"
+          else
+            echo "::error::Database connection test FAILED for ${{ inputs.environment }}"
+          fi
